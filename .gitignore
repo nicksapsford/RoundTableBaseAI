@@ -1,0 +1,33 @@
+# TideTrader AI -- Git ignore rules
+
+# Secrets -- never commit
+.env
+
+# Logs and trade data
+logs/
+*.log
+*.csv
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE and local tool config
+.vscode/
+.idea/
+.claude/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# .env.template is safe to commit (no secrets)
+!.env.template

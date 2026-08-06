@@ -1,0 +1,26 @@
+#!/bin/sh
+# Albion Trading Desk -- pre-commit hook.
+# Validates the JavaScript embedded in dashboard_*.py page templates so a mangled
+# escape (e.g. "\\" -> emitted "\" -> unterminated JS string -> blank dashboard)
+# fails the commit here, instead of surfacing only after a restart.
+# See tools/check_dashboard_js.py. Activated via: git config core.hooksPath .githooks
+root="$(git rev-parse --show-toplevel)"
+py=""
+for cand in python py python3; do
+    if command -v "$cand" >/dev/null 2>&1; then
+        py="$cand"
+        break
+    fi
+done
+if [ -z "$py" ]; then
+    echo "pre-commit: python not found on PATH -- skipping dashboard JS check." >&2
+    exit 0
+fi
+"$py" "$root/tools/check_dashboard_js.py"
+if [ "$?" -ne 0 ]; then
+    echo "" >&2
+    echo "pre-commit: dashboard JS validation FAILED -- commit aborted." >&2
+    echo "(To override in a genuine emergency: git commit --no-verify)" >&2
+    exit 1
+fi
+exit 0
