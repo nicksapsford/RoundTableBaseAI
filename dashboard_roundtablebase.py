@@ -1,7 +1,7 @@
 """
 dashboard_roundtablebase.py -- RoundTableBase A.I. (AlbionBase Desk)
 ================================================================================
-Command centre for the AlbionBase promotion desk. Port 5040.
+Command centre for the AlbionBase promotion desk. Port 5036.
 
   * Reads the 4 AlbionBase systems -- OilBase 5035, GoldBase 5033, FTSEBase 5032,
     USBase 5034 (shows only the ones that are up; offline systems render gracefully).
@@ -28,7 +28,7 @@ from flask import Flask, Response, jsonify, request
 BASE_DIR = Path(__file__).resolve().parent
 _VER = BASE_DIR / "VERSION"
 APP_VERSION = _VER.read_text().strip() if _VER.exists() else "1.0.0"
-PORT = 5040
+PORT = 5036
 FETCH_TIMEOUT = 2.5
 
 logging.basicConfig(level=logging.WARNING)
