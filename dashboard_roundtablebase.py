@@ -122,6 +122,7 @@ def _fetch_one(cfg):
            "online": False, "mode": None, "price": None, "position": None,
            "floating_gbp": 0.0, "locked": None, "today_pnl": None, "balance": None,
            "cum_pnl": None, "lancelot": "--", "session": "24/7" if cfg["key"] == "crypto" else "--",
+           "acct_bal": None, "acct_type": None,
            "orig_balance": None, "orig_cum_pnl": None}
 
     st = _get_json("http://%s:%d/api/state" % (ALBIONBASE_HOST, cfg["port"]))
@@ -147,6 +148,8 @@ def _fetch_one(cfg):
         else:
             row["locked"] = _fnum(st.get("locked_gbp"))
         row["mode"] = st.get("mode")
+        row["acct_bal"] = _fnum(st.get("account_balance"))    # Part 3: shared Capital.com pot (read-only)
+        row["acct_type"] = st.get("account_type")
         row["session"] = st.get("session") or row["session"]
         if bal is not None:
             row["cum_pnl"] = round(bal - cfg["start"], 2)
@@ -189,10 +192,18 @@ def _gather():
     bench_cum = sum((r["cum_pnl"] or 0.0) for r in online)
     orig_val = sum((r["orig_balance"] or 0.0) for r in online if r["orig_balance"] is not None)
     orig_cum = sum((r["orig_cum_pnl"] or 0.0) for r in online if r["orig_cum_pnl"] is not None)
+    # Part 3: TOTAL POT = the real (shared) Capital.com balance -- every system reports the same figure,
+    # so take the first non-null. Risk per trade = 2% of it. Read-only.
+    pots = [r["acct_bal"] for r in online if r.get("acct_bal") is not None]
+    total_pot = pots[0] if pots else None
+    atypes = [r["acct_type"] for r in online if r.get("acct_type")]
+    account_type = (atypes[0] if atypes else "DEMO")
+    risk_pt = round(total_pot * 0.02, 2) if total_pot else None
     return {
         "systems": rows,
         "online_count": len(online),
         "total_count": len(SYSTEMS),
+        "pot": {"total": total_pot, "account_type": account_type, "risk": risk_pt},
         "base": {"value": round(bench_val, 2), "today_pnl": round(bench_today, 2),
                       "cum_pnl": round(bench_cum, 2)},
         "original": {"cum_pnl": round(orig_cum, 2), "value": round(orig_val, 2)},
@@ -228,6 +239,10 @@ def build_base_brief(g):
     lines.append(bar)
     lines.append("")
     lines.append("PORTFOLIO")
+    _pot = g.get("pot") or {}
+    if _pot.get("total") is not None:
+        lines.append("  TOTAL POT       : GBP %.2f (%s, read-only) | risk/trade GBP %.2f"
+                     % (_pot["total"], _pot.get("account_type", "DEMO"), _pot.get("risk") or 0.0))
     lines.append("  Base Total : GBP %.2f" % b["value"])
     lines.append("  Original Desk   : GBP %.2f" % o["value"])
     lines.append("  Delta           : %s (%s of the AI desk)" % (_g(delta), delta_word))
@@ -379,10 +394,11 @@ tr.offline td{color:#555;}
   </div>
 </header>
 <div class="wrap">
+  <div id="potbar" style="display:flex;gap:26px;align-items:center;flex-wrap:wrap;background:var(--bg2);border:1px solid var(--bd);border-radius:10px;padding:12px 18px;margin-bottom:14px;"></div>
   <div class="cmp" id="cmp"></div>
   <table><thead><tr>
     <th>System</th><th>Status</th><th>Price</th><th>Position</th><th>Floating</th>
-    <th>Locked</th><th>Today</th><th>Balance</th><th>Cum P&amp;L</th><th>Lancelot</th><th>Switch</th>
+    <th>Locked</th><th>Today</th><th>Cum P&amp;L</th><th>Lancelot</th><th>Switch</th>
   </tr></thead><tbody id="rows"></tbody></table>
   <div class="note">Base P&amp;L vs Original Desk P&amp;L is compared only over base systems currently online
     (apples-to-apples). Systems 5022-5026 appear here automatically as they are built. Paper trading only.</div>
@@ -414,6 +430,17 @@ function poll(){
       '<div class="box"><div class="lbl">Original Desk Cum P&amp;L</div><div class="big '+cls(o.cum_pnl)+'">'+money(o.cum_pnl)+'</div><div class="sub">matched systems &middot; value £'+Number(o.value).toFixed(2)+'</div></div>'+
       '<div class="box"><div class="lbl">Systems Online</div><div class="big">'+d.online_count+' / '+d.total_count+'</div><div class="sub">updated '+(d.updated_utc||'--')+' UTC</div></div>'+
       '<div class="verdict '+vClass+'">'+vTxt+'</div>';
+    var p=d.pot||{};
+    var live=(p.account_type==='LIVE');
+    var tBg=live?'#12331b':'#26262b',tFg=live?'#3fb950':'#8b949e',tBd=live?'#2ea043':'#444c56';
+    document.getElementById('potbar').innerHTML=
+      '<div><div style="color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:0.6px;">Total Pot</div>'+
+      '<div style="font-size:22px;font-weight:800;">'+(p.total!=null?bal(p.total):'--')+'</div></div>'+
+      '<div><div style="color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:0.6px;">Account</div>'+
+      '<div style="margin-top:4px;"><span style="background:'+tBg+';color:'+tFg+';border:1px solid '+tBd+';border-radius:4px;padding:2px 9px;font-weight:700;letter-spacing:1px;">'+(p.account_type||'DEMO')+'</span></div></div>'+
+      '<div><div style="color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:0.6px;">Risk / Trade (2%)</div>'+
+      '<div style="font-size:22px;font-weight:800;">'+(p.risk!=null?bal(p.risk):'--')+'</div></div>'+
+      '<div class="mut" style="font-size:11px;max-width:300px;line-height:1.5;">Read live from the Capital.com account (read-only). Per-system paper balances retired &mdash; per-system P&amp;L is in the table.</div>';
     var h='';
     for(var i=0;i<d.systems.length;i++){var s=d.systems[i];
       if(!s.online){
@@ -428,7 +455,6 @@ function poll(){
         '<td class="'+cls(s.floating_gbp)+'">'+money(s.floating_gbp)+'</td>'+
         '<td class="'+(s.locked!=null&&Number(s.locked)>0?'green':'mut')+'">'+(s.locked!=null&&Number(s.locked)>0?'&#128274; +£'+Number(s.locked).toFixed(2):'--')+'</td>'+
         '<td class="'+cls(s.today_pnl)+'">'+money(s.today_pnl)+'</td>'+
-        '<td>'+bal(s.balance)+'</td>'+
         '<td class="'+cls(s.cum_pnl)+'">'+money(s.cum_pnl)+'</td>'+
         '<td class="mut" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;">'+(s.lancelot||'--')+'</td>'+
         '<td>'+swBtns(s.key,s.mode,s.online)+'</td></tr>';
