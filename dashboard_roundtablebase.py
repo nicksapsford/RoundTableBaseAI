@@ -31,6 +31,25 @@ APP_VERSION = _VER.read_text().strip() if _VER.exists() else "1.0.0"
 PORT = 5036
 FETCH_TIMEOUT = 2.5
 
+# ── Monitoring separation (Part 2, .env-driven; each PC shows only its OWN systems) ──
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BASE_DIR / ".env")
+except Exception:
+    pass
+ENV_LABEL       = os.getenv("ENV_LABEL", "TEST").strip().upper()         # TEST (Dell, amber) / LIVE (K1, green)
+ALBIONBASE_HOST = os.getenv("ALBIONBASE_HOST", "localhost")              # this PC's own AlbionBase systems
+# The main-desk comparison (5002-5005) + Gaius (:5012) live on the DELL. Empty -> local (this IS the Dell)
+# so localhost is correct; set to the Dell Tailscale IP on the K1. Unreachable -> renders "N/A" gracefully.
+ALBIONBASE_DELL_HOST = (os.getenv("ALBIONBASE_DELL_HOST", "").strip() or "localhost")
+
+if ENV_LABEL == "LIVE":
+    _ENV_BADGE = ('<span style="background:#12331b;color:#3fb950;border:1px solid #2ea043;border-radius:5px;'
+                  'padding:3px 11px;font-size:12px;font-weight:700;letter-spacing:1px;">LIVE &mdash; K1</span>')
+else:
+    _ENV_BADGE = ('<span style="background:#3a2f00;color:#e0b020;border:1px solid #6b5600;border-radius:5px;'
+                  'padding:3px 11px;font-size:12px;font-weight:700;letter-spacing:1px;">TEST &mdash; Dell</span>')
+
 logging.basicConfig(level=logging.WARNING)
 logging.Formatter.converter = time.gmtime
 log = logging.getLogger("RoundTableBase")
@@ -105,7 +124,7 @@ def _fetch_one(cfg):
            "cum_pnl": None, "lancelot": "--", "session": "24/7" if cfg["key"] == "crypto" else "--",
            "orig_balance": None, "orig_cum_pnl": None}
 
-    st = _get_json("http://localhost:%d/api/state" % cfg["port"])
+    st = _get_json("http://%s:%d/api/state" % (ALBIONBASE_HOST, cfg["port"]))
     if st and (st.get("portfolio") or st.get("balance") is not None):
         row["online"] = True
         port = st.get("portfolio") or {}
@@ -146,12 +165,12 @@ def _fetch_one(cfg):
 
     # Direction mode authoritative from the switch endpoint (if online)
     if row["online"] and not row["mode"]:
-        d = _get_json("http://localhost:%d/api/direction" % cfg["port"])
+        d = _get_json("http://%s:%d/api/direction" % (ALBIONBASE_HOST, cfg["port"]))
         if d:
             row["mode"] = d.get("mode")
 
     # Original-desk counterpart P&L (comparison side)
-    ost = _get_json("http://localhost:%d/api/state" % cfg["orig_port"])
+    ost = _get_json("http://%s:%d/api/state" % (ALBIONBASE_DELL_HOST, cfg["orig_port"]))
     if ost:
         ob = _orig_balance(ost, cfg["orig_kind"], cfg["start"])
         if ob is not None:
@@ -275,7 +294,7 @@ def api_direction(key):
     try:
         body = request.get_json(force=True, silent=True) or {}
         payload = json.dumps({"mode": body.get("mode"), "by": body.get("by") or "Nick"}).encode("utf-8")
-        res = _get_json("http://localhost:%d/api/direction" % cfg["port"], method="POST", data=payload)
+        res = _get_json("http://%s:%d/api/direction" % (ALBIONBASE_HOST, cfg["port"]), method="POST", data=payload)
         if res is None:
             return jsonify({"error": "system offline"}), 502
         return jsonify(res)
@@ -291,7 +310,7 @@ def api_shutdown_all():
     endpoint is reported but does not block the rest."""
     results = {}
     for port in SHUTDOWN_PORTS:
-        url = "http://localhost:%d/api/shutdown" % port
+        url = "http://%s:%d/api/shutdown" % (ALBIONBASE_HOST, port)
         try:
             req = urllib.request.Request(url, data=b"{}", method="POST",
                                          headers={"Content-Type": "application/json"})
@@ -351,8 +370,9 @@ tr.offline td{color:#555;}
 </style></head><body>
 <header>
   <div class="brand">&#127942; <span class="cap">Base RoundTable</span>
-    <small>__VER__ &middot; port 5030 &middot; pure Lancelot + SSL, no AI overlay</small></div>
+    <small>__VER__ &middot; port 5036 &middot; pure Lancelot + SSL, no AI overlay</small></div>
   <div style="display:flex;align-items:center;gap:12px;">
+    __ENV__
     <button onclick="shutdownAll()" title="Shut down all base systems + this RoundTable"
       style="font-size:12px;font-weight:700;color:#e74c3c;background:rgba(231,76,60,0.15);border:1px solid rgba(231,76,60,0.6);padding:4px 11px;border-radius:4px;cursor:pointer;vertical-align:middle;">&#9211; SHUTDOWN ALL</button>
     <div class="clock" id="clock">--:--:-- UTC</div>
@@ -496,7 +516,7 @@ function shutdownAll(){
 
 @app.route("/")
 def index():
-    return HTML.replace("__VER__", "v" + APP_VERSION)
+    return HTML.replace("__VER__", "v" + APP_VERSION).replace("__ENV__", _ENV_BADGE)
 
 
 @app.route("/api/gaius-status")
@@ -522,7 +542,7 @@ def api_gaius_status():
 def api_gaius_collect():
     """Proxy a manual Gaius collection to the collector API (:5012 /api/collect-now)."""
     try:
-        req = urllib.request.Request("http://localhost:5012/api/collect-now",
+        req = urllib.request.Request("http://%s:5012/api/collect-now" % ALBIONBASE_DELL_HOST,
                                      data=b"{}", method="POST",
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=5) as r:
