@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, request
-from trading_mode import read_mode, write_mode, ALLOW_LIVE_TRADING, PNL_START_DATE
+from trading_mode import read_mode, write_mode, reset_to_demo, PNL_START_DATE
 
 BASE_DIR = Path(__file__).resolve().parent
 _VER = BASE_DIR / "VERSION"
@@ -51,10 +51,43 @@ else:
     _ENV_BADGE = ('<span style="background:#3a2f00;color:#e0b020;border:1px solid #6b5600;border-radius:5px;'
                   'padding:3px 11px;font-size:12px;font-weight:700;letter-spacing:1px;">TEST &mdash; Dell</span>')
 
+PUSHOVER_USER_KEY  = os.getenv("PUSHOVER_USER_KEY", "").strip()
+PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN", "").strip()
+
 logging.basicConfig(level=logging.WARNING)
 logging.Formatter.converter = time.gmtime
 log = logging.getLogger("RoundTableBase")
 app = Flask(__name__)
+
+# Part 3f: the desk ALWAYS starts in DEMO -- never auto-resume LIVE after a restart. Nick manually flips
+# back to LIVE once he has confirmed everything is running correctly. RoundTableBase owns the switch file.
+try:
+    reset_to_demo()
+    log.warning("Startup: trading mode forced to DEMO (Part 3f).")
+except Exception as _e:
+    log.warning("Startup DEMO reset failed: %s", _e)
+
+
+def _pushover_send(title, message):
+    """Percival alert via Pushover. Silent no-op if credentials are not configured."""
+    if not (PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN):
+        log.warning("Pushover not configured -- skipping alert: %s", message)
+        return
+    try:
+        import urllib.parse
+        data = urllib.parse.urlencode({"token": PUSHOVER_API_TOKEN, "user": PUSHOVER_USER_KEY,
+                                       "title": title, "message": message, "priority": 1}).encode()
+        urllib.request.urlopen("https://api.pushover.net/1/messages.json", data=data, timeout=6)
+    except Exception as exc:
+        log.warning("Pushover send failed: %s", exc)
+
+
+def _percival_mode_alert(mode):
+    """Part 3e: fire a Pushover on every DEMO/LIVE change."""
+    if mode == "LIVE":
+        _pushover_send("AlbionBase mode change", "AlbionBase switched to LIVE — real money active")
+    else:
+        _pushover_send("AlbionBase mode change", "AlbionBase switched to DEMO — demo mode active")
 
 # AlbionBase systems (standalone desk -- no cross-desk comparison, Part 4a). 3 instruments: Gold/Oil/US500.
 SYSTEMS = [
@@ -127,6 +160,7 @@ def _fetch_one(cfg):
         row["acct_type"] = st.get("account_type")
         row["session"] = st.get("session") or row["session"]
         row["market"] = st.get("market")   # Part 4d: {in_session, tradeable, hours} for the status dot
+        row["live_configured"] = st.get("live_configured")   # DEMO/LIVE: are this system's live creds set?
         # Part 4c: cum P&L = real Capital.com orders only. Each system now reports cum_pnl computed from
         # its own trade CSV since the Stage-B epoch (Stanley paper-era excluded). Fall back to
         # balance-minus-start for any system that predates the field.
@@ -257,24 +291,46 @@ def api_systems():
     return Response(json.dumps(_gather(), default=str), mimetype="application/json")
 
 
+def _switch_state():
+    """(mode, live_configured, position_open). live_configured = every online trader has live creds;
+    position_open = any online system currently holds a position."""
+    g = _gather()
+    online = [s for s in g["systems"] if s.get("online")]
+    pos_open = any((s.get("position") or "FLAT") not in ("FLAT", "--", "") for s in online)
+    flags = [s.get("live_configured") for s in online if s.get("live_configured") is not None]
+    live_configured = bool(flags) and all(flags)
+    return read_mode(), live_configured, pos_open
+
+
 @app.route("/api/trading-mode", methods=["GET", "POST"])
 def api_trading_mode():
-    """PAPER/LIVE switch (replaces WITH/AGAINST). GET -> current mode + whether the switch is unlocked
-    (ALLOW_LIVE_TRADING). POST {mode:'PAPER'|'LIVE'} moves ALL systems together. LIVE is REFUSED unless
-    ALLOW_LIVE_TRADING (Layer-1 lock -- Dell can never go LIVE); PAPER is always allowed (always safe)."""
+    """DEMO/LIVE account switch. GET -> {mode, live_configured, position_open}. POST {mode:'DEMO'|'LIVE'}
+    moves ALL systems together. Guards (Nick-only, behind a UI confirmation):
+      * Part 3d -- REFUSED (409) while any position is open (never one account opening, another closing).
+      * Part 4  -- LIVE REFUSED (403) when the live credentials are blank ('not configured').
+      * Part 3e -- a Percival Pushover alert fires on every successful change."""
+    mode, live_configured, pos_open = _switch_state()
     if request.method == "GET":
-        return jsonify({"mode": read_mode(), "allow_live": ALLOW_LIVE_TRADING})
+        return jsonify({"mode": mode, "live_configured": live_configured, "position_open": pos_open})
     body = request.get_json(force=True, silent=True) or {}
-    want = str(body.get("mode", "")).upper()
-    if want not in ("PAPER", "LIVE"):
-        return jsonify({"error": "mode must be PAPER or LIVE"}), 400
-    if want == "LIVE" and not ALLOW_LIVE_TRADING:
-        log.warning("PAPER/LIVE: LIVE requested but ALLOW_LIVE_TRADING is False -- REFUSED (locked).")
-        return jsonify({"error": "Live trading is locked on this machine (ALLOW_LIVE_TRADING=False).",
-                        "mode": read_mode(), "allow_live": False}), 403
+    want = str(body.get("mode", "")).strip().upper()
+    if want not in ("DEMO", "LIVE"):
+        return jsonify({"error": "mode must be DEMO or LIVE"}), 400
+    if want == mode:
+        return jsonify({"mode": mode, "live_configured": live_configured, "position_open": pos_open, "ok": True})
+    if pos_open:
+        log.warning("DEMO/LIVE switch to %s REFUSED -- a position is open.", want)
+        return jsonify({"error": "A position is open. Wait for it to close before switching modes.",
+                        "mode": mode, "live_configured": live_configured, "position_open": True}), 409
+    if want == "LIVE" and not live_configured:
+        log.warning("DEMO/LIVE switch to LIVE REFUSED -- live credentials not configured.")
+        return jsonify({"error": "Live account not configured. Please add live credentials to .env first.",
+                        "mode": mode, "live_configured": False, "position_open": False}), 403
     ok = write_mode(want)
-    log.warning("PAPER/LIVE switch -> %s (by Nick) | written=%s", want, ok)
-    return jsonify({"mode": read_mode(), "allow_live": ALLOW_LIVE_TRADING, "ok": ok})
+    log.warning("DEMO/LIVE switch -> %s (by Nick) | written=%s", want, ok)
+    if ok:
+        _percival_mode_alert(want)
+    return jsonify({"mode": read_mode(), "live_configured": live_configured, "position_open": pos_open, "ok": ok})
 
 
 @app.route("/api/shutdown-all", methods=["POST"])
@@ -348,8 +404,8 @@ tr.offline td{color:#555;}
     <small>__VER__ &middot; port 5036 &middot; pure Lancelot + SSL, no AI overlay</small></div>
   <div style="display:flex;align-items:center;gap:12px;">
     __ENV__
-    <span id="modeLabel" style="padding:3px 10px;border-radius:5px;font-weight:700;font-size:12px;letter-spacing:0.5px;background:#3a2f00;color:#e0b020;border:1px solid #6b5600;">PAPER &mdash; DEMO</span>
-    <span id="modeSw" title="Live trading locked -- demo only" style="padding:4px 11px;border-radius:5px;font-weight:700;font-size:12px;background:#26262b;color:#6e7681;border:1px solid #444c56;cursor:not-allowed;">&#128274; PAPER</span>
+    <span id="modeLabel" style="padding:3px 10px;border-radius:5px;font-weight:700;font-size:12px;letter-spacing:0.5px;background:#3a2f00;color:#e0b020;border:1px solid #6b5600;">DEMO</span>
+    <span id="modeSw" title="Click to switch account" style="padding:5px 13px;border-radius:5px;font-weight:800;font-size:12px;letter-spacing:0.5px;background:#3a2f00;color:#e0b020;border:1px solid #6b5600;cursor:pointer;">DEMO &#8594; click for LIVE</span>
     <button onclick="shutdownAll()" title="Shut down all base systems + this RoundTable"
       style="font-size:12px;font-weight:700;color:#e74c3c;background:rgba(231,76,60,0.15);border:1px solid rgba(231,76,60,0.6);padding:4px 11px;border-radius:4px;cursor:pointer;vertical-align:middle;">&#9211; SHUTDOWN ALL</button>
     <div class="clock" id="clock">--:--:-- UTC</div>
@@ -372,16 +428,23 @@ setInterval(clk,1000);clk();
 function money(v){if(v===null||v===undefined)return '--';var n=Number(v);return (n<0?'-£':'+£')+Math.abs(n).toFixed(2);}
 function bal(v){return v===null||v===undefined?'--':'£'+Number(v).toFixed(2);}
 function cls(v){return Number(v)>=0?'bull':'bear';}
-function renderMode(m, allowLive){
-  var live=(m==='LIVE');
+function renderMode(d){
+  var m=(d&&d.mode)||'DEMO', live=(m==='LIVE'), posOpen=!!(d&&d.position_open);
   var lbl=document.getElementById('modeLabel'), sw=document.getElementById('modeSw');
-  if(lbl){ lbl.innerHTML = live?'LIVE &mdash; REAL MONEY':'PAPER &mdash; DEMO';
-    lbl.style.cssText='padding:3px 10px;border-radius:5px;font-weight:700;font-size:12px;letter-spacing:0.5px;'+(live?'background:#12331b;color:#3fb950;border:1px solid #2ea043;':'background:#3a2f00;color:#e0b020;border:1px solid #6b5600;'); }
+  var redCss='background:#3d0f0f;color:#ff5555;border:1px solid #b02020;';
+  var amberCss='background:#3a2f00;color:#e0b020;border:1px solid #6b5600;';
+  if(lbl){ lbl.innerHTML=live?'LIVE &mdash; REAL MONEY':'DEMO';
+    lbl.style.cssText='padding:3px 10px;border-radius:5px;font-weight:700;font-size:12px;letter-spacing:0.5px;'+(live?redCss:amberCss); }
   if(sw){
-    if(!allowLive){ sw.innerHTML='&#128274; PAPER'; sw.title='Live trading locked -- demo only';
-      sw.style.cssText='padding:4px 11px;border-radius:5px;font-weight:700;font-size:12px;background:#26262b;color:#6e7681;border:1px solid #444c56;cursor:not-allowed;'; sw.onclick=null; }
-    else { sw.innerHTML=live?'LIVE &#8594; click for PAPER':'PAPER &#8594; click for LIVE'; sw.title='Flip PAPER/LIVE for ALL systems';
-      sw.style.cssText='padding:4px 11px;border-radius:5px;font-weight:700;font-size:12px;cursor:pointer;'+(live?'background:#12331b;color:#3fb950;border:1px solid #2ea043;':'background:#3a2f00;color:#e0b020;border:1px solid #6b5600;'); sw.onclick=flipMode; }
+    var base='padding:5px 13px;border-radius:5px;font-weight:800;font-size:12px;letter-spacing:0.5px;';
+    if(posOpen){
+      sw.innerHTML=(live?'LIVE':'DEMO')+' &#128274;'; sw.title='A position is open -- wait for it to close before switching modes';
+      sw.style.cssText=base+'cursor:not-allowed;opacity:0.6;'+(live?redCss:amberCss); sw.onclick=null;
+    } else {
+      sw.innerHTML=live?'LIVE &mdash; REAL MONEY &#8594; click for DEMO':'DEMO &#8594; click for LIVE';
+      sw.title=live?'Click to switch back to DEMO':'Click to switch to LIVE (real money)';
+      sw.style.cssText=base+'cursor:pointer;'+(live?redCss:amberCss); sw.onclick=flipMode;
+    }
   }
 }
 function sessionCell(s){
@@ -396,14 +459,21 @@ function sessionCell(s){
   return '<span title="'+title+'" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:'+color+';margin-right:6px;vertical-align:middle;"></span>'+
          '<span class="mut">'+hours+'</span>';
 }
-function pollMode(){ fetch('/api/trading-mode').then(function(r){return r.json();}).then(function(d){renderMode(d.mode,d.allow_live);}).catch(function(){}); }
+function pollMode(){ fetch('/api/trading-mode').then(function(r){return r.json();}).then(renderMode).catch(function(){}); }
 function flipMode(){
   fetch('/api/trading-mode').then(function(r){return r.json();}).then(function(d){
-    if(!d.allow_live){ alert('Live trading is locked on this machine (demo only).'); return; }
-    var target=(d.mode==='LIVE')?'PAPER':'LIVE';
-    if(target==='LIVE' && !confirm('Switch ALL systems to LIVE trading on your real Capital.com account. Are you sure? This will use real money.')) return;
+    if(d.position_open){ alert('A position is open. Wait for it to close before switching modes.'); return; }
+    var target=(d.mode==='LIVE')?'DEMO':'LIVE';
+    if(target==='LIVE'){
+      if(!d.live_configured){ alert('Live account not configured. Please add live credentials to .env first.'); return; }
+      if(!confirm('Switch to LIVE? This uses REAL MONEY on your live account. Are you sure?')) return;
+    } else {
+      if(!confirm('Switch back to DEMO?')) return;
+    }
     fetch('/api/trading-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:target})})
-      .then(function(r){return r.json();}).then(function(d2){ renderMode(d2.mode,d2.allow_live); }).catch(function(){});
+      .then(function(r){return r.json().then(function(j){return {status:r.status,j:j};});})
+      .then(function(res){ if(res.status>=400 && res.j && res.j.error){ alert(res.j.error); } renderMode(res.j); })
+      .catch(function(){});
   });
 }
 function poll(){
