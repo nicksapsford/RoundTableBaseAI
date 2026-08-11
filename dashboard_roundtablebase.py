@@ -3,7 +3,7 @@ dashboard_roundtablebase.py -- RoundTableBase A.I. (AlbionBase Desk)
 ================================================================================
 Command centre for the AlbionBase promotion desk. Port 5036.
 
-  * Reads the 4 AlbionBase systems -- OilBase 5035, GoldBase 5033, FTSEBase 5032,
+  * Reads the 3 AlbionBase systems -- OilBase 5035, GoldBase 5033,
     USBase 5034 (shows only the ones that are up; offline systems render gracefully).
   * Reads the live AI traders on ports 5002-5005 purely for the P&L comparison
     (AlbionBase mechanical vs full-AI Albion, apples-to-apples per instrument).
@@ -59,8 +59,9 @@ app = Flask(__name__)
 SYSTEMS = [
     {"key": "oil",  "name": "OilBase",  "market": "Brent Crude", "port": 5035, "start": 1000.0, "orig_port": 5005, "orig_kind": "oil",  "colour": "#FF6600"},
     {"key": "gold", "name": "GoldBase", "market": "GOLD (XAU)",  "port": 5033, "start": 1000.0, "orig_port": 5003, "orig_kind": "gold", "colour": "#FFD700"},
-    {"key": "ftse", "name": "FTSEBase", "market": "FTSE 100",    "port": 5032, "start": 1000.0, "orig_port": 5002, "orig_kind": "ftse", "colour": "#4169E1"},
     {"key": "us",   "name": "USBase",   "market": "S&P 500",     "port": 5034, "start": 1000.0, "orig_port": 5004, "orig_kind": "us",   "colour": "#FFFFFF"},
+    # FTSEBase REMOVED 11 Aug 2026 -- £2/pt on UK100 (~£21.7k notional, ~£1,080 margin) exceeds the
+    # £3,000 pot at 2% risk. AlbionBase runs 3 instruments: Gold, Oil, US500. FTSEBaseAI repo archived.
 ]
 SYS_BY_KEY = {s["key"]: s for s in SYSTEMS}
 
