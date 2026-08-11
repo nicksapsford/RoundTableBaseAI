@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, request
+from trading_mode import read_mode, write_mode, ALLOW_LIVE_TRADING, PNL_START_DATE
 
 BASE_DIR = Path(__file__).resolve().parent
 _VER = BASE_DIR / "VERSION"
@@ -55,11 +56,11 @@ logging.Formatter.converter = time.gmtime
 log = logging.getLogger("RoundTableBase")
 app = Flask(__name__)
 
-# Base systems + their original-desk counterpart (for the comparison).
+# AlbionBase systems (standalone desk -- no cross-desk comparison, Part 4a). 3 instruments: Gold/Oil/US500.
 SYSTEMS = [
-    {"key": "oil",  "name": "OilBase",  "market": "Brent Crude", "port": 5035, "start": 1000.0, "orig_port": 5005, "orig_kind": "oil",  "colour": "#FF6600"},
-    {"key": "gold", "name": "GoldBase", "market": "GOLD (XAU)",  "port": 5033, "start": 1000.0, "orig_port": 5003, "orig_kind": "gold", "colour": "#FFD700"},
-    {"key": "us",   "name": "USBase",   "market": "S&P 500",     "port": 5034, "start": 1000.0, "orig_port": 5004, "orig_kind": "us",   "colour": "#FFFFFF"},
+    {"key": "oil",  "name": "OilBase",  "market": "Brent Crude", "port": 5035, "start": 1000.0, "colour": "#FF6600"},
+    {"key": "gold", "name": "GoldBase", "market": "GOLD (XAU)",  "port": 5033, "start": 1000.0, "colour": "#FFD700"},
+    {"key": "us",   "name": "USBase",   "market": "S&P 500",     "port": 5034, "start": 1000.0, "colour": "#FFFFFF"},
     # FTSEBase REMOVED 11 Aug 2026 -- £2/pt on UK100 (~£21.7k notional, ~£1,080 margin) exceeds the
     # £3,000 pot at 2% risk. AlbionBase runs 3 instruments: Gold, Oil, US500. FTSEBaseAI repo archived.
 ]
@@ -90,32 +91,6 @@ def _get_json(url, timeout=FETCH_TIMEOUT, method="GET", data=None):
         return None
 
 
-def _orig_balance(state, kind, start):
-    """Balance from an ORIGINAL system's /api/state (mirrors RoundTable extraction)."""
-    if kind == "crypto":
-        b = _fnum(state.get("combined_capital"))
-        if b is None:
-            a = _fnum((state.get("account") or {}).get("capital")) or 0.0
-            e = _fnum((state.get("account_eth") or {}).get("capital")) or 0.0
-            b = a + e
-        return b
-    b = _fnum(state.get("capital"))
-    if b is None:
-        b = _fnum((state.get("account") or {}).get("capital"))
-    return b
-
-
-def _orig_daily(state, kind):
-    if kind == "crypto":
-        a = _fnum((state.get("account") or {}).get("daily_pnl")) or 0.0
-        e = _fnum((state.get("account_eth") or {}).get("daily_pnl")) or 0.0
-        return a + e
-    v = _fnum((state.get("account") or {}).get("daily_pnl"))
-    if v is None:
-        v = _fnum(state.get("daily_pnl"))
-    return v if v is not None else 0.0
-
-
 def _fetch_one(cfg):
     """Return a uniform row for one base system + its original counterpart."""
     row = {"key": cfg["key"], "name": cfg["name"], "market": cfg["market"],
@@ -123,8 +98,7 @@ def _fetch_one(cfg):
            "online": False, "mode": None, "price": None, "position": None,
            "floating_gbp": 0.0, "locked": None, "today_pnl": None, "balance": None,
            "cum_pnl": None, "lancelot": "--", "session": "24/7" if cfg["key"] == "crypto" else "--",
-           "acct_bal": None, "acct_type": None,
-           "orig_balance": None, "orig_cum_pnl": None}
+           "market": None, "acct_bal": None, "acct_type": None}
 
     st = _get_json("http://%s:%d/api/state" % (ALBIONBASE_HOST, cfg["port"]))
     if st and (st.get("portfolio") or st.get("balance") is not None):
@@ -152,7 +126,14 @@ def _fetch_one(cfg):
         row["acct_bal"] = _fnum(st.get("account_balance"))    # Part 3: shared Capital.com pot (read-only)
         row["acct_type"] = st.get("account_type")
         row["session"] = st.get("session") or row["session"]
-        if bal is not None:
+        row["market"] = st.get("market")   # Part 4d: {in_session, tradeable, hours} for the status dot
+        # Part 4c: cum P&L = real Capital.com orders only. Each system now reports cum_pnl computed from
+        # its own trade CSV since the Stage-B epoch (Stanley paper-era excluded). Fall back to
+        # balance-minus-start for any system that predates the field.
+        cum = _fnum(st.get("cum_pnl"))
+        if cum is not None:
+            row["cum_pnl"] = round(cum, 2)
+        elif bal is not None:
             row["cum_pnl"] = round(bal - cfg["start"], 2)
         # A compact position/lancelot summary (crypto has two instruments)
         legs = [st.get("btc"), st.get("eth")] if cfg["key"] == "crypto" else [st]
@@ -167,19 +148,7 @@ def _fetch_one(cfg):
         row["lancelot"] = " / ".join(b for b in lanc_bits if b) or "--"
         row["price"] = (st.get("btc") or {}).get("price") if cfg["key"] == "crypto" else _fnum(st.get("price"))
 
-    # Direction mode authoritative from the switch endpoint (if online)
-    if row["online"] and not row["mode"]:
-        d = _get_json("http://%s:%d/api/direction" % (ALBIONBASE_HOST, cfg["port"]))
-        if d:
-            row["mode"] = d.get("mode")
-
-    # Original-desk counterpart P&L (comparison side)
-    ost = _get_json("http://%s:%d/api/state" % (ALBIONBASE_DELL_HOST, cfg["orig_port"]))
-    if ost:
-        ob = _orig_balance(ost, cfg["orig_kind"], cfg["start"])
-        if ob is not None:
-            row["orig_balance"] = round(ob, 2)
-            row["orig_cum_pnl"] = round(ob - cfg["start"], 2)
+    # Part 2: PAPER/LIVE trading mode is a desk-wide master (trading_mode.json), not per-system.
     return row
 
 
@@ -187,12 +156,11 @@ def _gather():
     with ThreadPoolExecutor(max_workers=len(SYSTEMS)) as ex:
         rows = list(ex.map(_fetch_one, SYSTEMS))
     online = [r for r in rows if r["online"]]
-    # apples-to-apples: compare only systems whose BASE side is online
+    # AlbionBase is a standalone desk -- its only measure is its own pot growth (Part 4a: no cross-desk
+    # comparison). cum P&L sums each online system's real-orders-only figure (Part 4c).
     bench_val = sum((r["balance"] or 0.0) for r in online)
     bench_today = sum((r["today_pnl"] or 0.0) for r in online)
     bench_cum = sum((r["cum_pnl"] or 0.0) for r in online)
-    orig_val = sum((r["orig_balance"] or 0.0) for r in online if r["orig_balance"] is not None)
-    orig_cum = sum((r["orig_cum_pnl"] or 0.0) for r in online if r["orig_cum_pnl"] is not None)
     # Part 3: TOTAL POT = the real (shared) Capital.com balance -- every system reports the same figure,
     # so take the first non-null. Risk per trade = 2% of it. Read-only.
     pots = [r["acct_bal"] for r in online if r.get("acct_bal") is not None]
@@ -207,8 +175,7 @@ def _gather():
         "pot": {"total": total_pot, "account_type": account_type, "risk": risk_pt},
         "base": {"value": round(bench_val, 2), "today_pnl": round(bench_today, 2),
                       "cum_pnl": round(bench_cum, 2)},
-        "original": {"cum_pnl": round(orig_cum, 2), "value": round(orig_val, 2)},
-        "delta": round(bench_cum - orig_cum, 2),   # >0 = base ahead of AI desk
+        "pnl_start": PNL_START_DATE,
         "version": APP_VERSION,
         "updated_utc": datetime.now(timezone.utc).strftime("%H:%M:%S"),
     }
@@ -230,9 +197,6 @@ def build_base_brief(g):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     bar = "=" * 60
     b = g["base"]
-    o = g["original"]
-    delta = g["delta"]
-    delta_word = "AHEAD" if delta >= 0 else "BEHIND"
     lines = []
     lines.append(bar)
     lines.append("ARCHIE BRIEF -- BASE ROUNDTABLE")
@@ -244,9 +208,8 @@ def build_base_brief(g):
     if _pot.get("total") is not None:
         lines.append("  TOTAL POT       : GBP %.2f (%s, read-only) | risk/trade GBP %.2f"
                      % (_pot["total"], _pot.get("account_type", "DEMO"), _pot.get("risk") or 0.0))
-    lines.append("  Base Total : GBP %.2f" % b["value"])
-    lines.append("  Original Desk   : GBP %.2f" % o["value"])
-    lines.append("  Delta           : %s (%s of the AI desk)" % (_g(delta), delta_word))
+    lines.append("  AlbionBase Total: GBP %.2f" % b["value"])
+    lines.append("  Cum P&L         : %s (real orders since %s)" % (_g(b["cum_pnl"]), g.get("pnl_start", "go-live")))
     lines.append("  Today           : %s" % _g(b["today_pnl"]))
     lines.append("  Systems online  : %d / %d" % (g["online_count"], g["total_count"]))
     lines.append("")
@@ -263,10 +226,10 @@ def build_base_brief(g):
         pos = s.get("position") or "FLAT"
         lines.append("")
         lines.append("%s [:%d]  ONLINE  price %s  %s" % (s["name"], s["port"], price, pos))
-        lines.append("    locked %s | today %s | bal %s | switch %s | lancelot %s | floating %s"
-                     % (_g(s.get("locked")), _g(s.get("today_pnl")),
+        lines.append("    locked %s | today %s | cum %s | bal %s | lancelot %s | floating %s"
+                     % (_g(s.get("locked")), _g(s.get("today_pnl")), _g(s.get("cum_pnl")),
                         ("GBP %.2f" % s["balance"]) if s.get("balance") is not None else "--",
-                        s.get("mode") or "--", s.get("lancelot") or "--", _g(s.get("floating_gbp"))))
+                        s.get("lancelot") or "--", _g(s.get("floating_gbp"))))
         if pos not in ("FLAT", "--", ""):
             open_positions.append("  %s: %s (floating %s)" % (s["name"], pos, _g(s.get("floating_gbp"))))
     lines.append("")
@@ -277,13 +240,6 @@ def build_base_brief(g):
         lines.extend(open_positions)
     else:
         lines.append("  No open positions")
-    lines.append("")
-    lines.append(bar)
-    lines.append("COMPARISON (cumulative P&L, matched online systems)")
-    lines.append(bar)
-    lines.append("  Base Cum P&L   : %s" % _g(b["cum_pnl"]))
-    lines.append("  Original Desk Cum   : %s" % _g(o["cum_pnl"]))
-    lines.append("  Delta               : %s (base %s)" % (_g(delta), delta_word))
     lines.append("")
     lines.append(bar)
     lines.append("End of Base RoundTable Archie Brief")
@@ -301,21 +257,24 @@ def api_systems():
     return Response(json.dumps(_gather(), default=str), mimetype="application/json")
 
 
-@app.route("/api/direction/<key>", methods=["POST"])
-def api_direction(key):
-    """Proxy a WITH/AGAINST switch change to the base system (live, no restart)."""
-    cfg = SYS_BY_KEY.get(key)
-    if not cfg:
-        return jsonify({"error": "unknown system"}), 404
-    try:
-        body = request.get_json(force=True, silent=True) or {}
-        payload = json.dumps({"mode": body.get("mode"), "by": body.get("by") or "Nick"}).encode("utf-8")
-        res = _get_json("http://%s:%d/api/direction" % (ALBIONBASE_HOST, cfg["port"]), method="POST", data=payload)
-        if res is None:
-            return jsonify({"error": "system offline"}), 502
-        return jsonify(res)
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+@app.route("/api/trading-mode", methods=["GET", "POST"])
+def api_trading_mode():
+    """PAPER/LIVE switch (replaces WITH/AGAINST). GET -> current mode + whether the switch is unlocked
+    (ALLOW_LIVE_TRADING). POST {mode:'PAPER'|'LIVE'} moves ALL systems together. LIVE is REFUSED unless
+    ALLOW_LIVE_TRADING (Layer-1 lock -- Dell can never go LIVE); PAPER is always allowed (always safe)."""
+    if request.method == "GET":
+        return jsonify({"mode": read_mode(), "allow_live": ALLOW_LIVE_TRADING})
+    body = request.get_json(force=True, silent=True) or {}
+    want = str(body.get("mode", "")).upper()
+    if want not in ("PAPER", "LIVE"):
+        return jsonify({"error": "mode must be PAPER or LIVE"}), 400
+    if want == "LIVE" and not ALLOW_LIVE_TRADING:
+        log.warning("PAPER/LIVE: LIVE requested but ALLOW_LIVE_TRADING is False -- REFUSED (locked).")
+        return jsonify({"error": "Live trading is locked on this machine (ALLOW_LIVE_TRADING=False).",
+                        "mode": read_mode(), "allow_live": False}), 403
+    ok = write_mode(want)
+    log.warning("PAPER/LIVE switch -> %s (by Nick) | written=%s", want, ok)
+    return jsonify({"mode": read_mode(), "allow_live": ALLOW_LIVE_TRADING, "ok": ok})
 
 
 @app.route("/api/shutdown-all", methods=["POST"])
@@ -389,6 +348,8 @@ tr.offline td{color:#555;}
     <small>__VER__ &middot; port 5036 &middot; pure Lancelot + SSL, no AI overlay</small></div>
   <div style="display:flex;align-items:center;gap:12px;">
     __ENV__
+    <span id="modeLabel" style="padding:3px 10px;border-radius:5px;font-weight:700;font-size:12px;letter-spacing:0.5px;background:#3a2f00;color:#e0b020;border:1px solid #6b5600;">PAPER &mdash; DEMO</span>
+    <span id="modeSw" title="Live trading locked -- demo only" style="padding:4px 11px;border-radius:5px;font-weight:700;font-size:12px;background:#26262b;color:#6e7681;border:1px solid #444c56;cursor:not-allowed;">&#128274; PAPER</span>
     <button onclick="shutdownAll()" title="Shut down all base systems + this RoundTable"
       style="font-size:12px;font-weight:700;color:#e74c3c;background:rgba(231,76,60,0.15);border:1px solid rgba(231,76,60,0.6);padding:4px 11px;border-radius:4px;cursor:pointer;vertical-align:middle;">&#9211; SHUTDOWN ALL</button>
     <div class="clock" id="clock">--:--:-- UTC</div>
@@ -399,10 +360,10 @@ tr.offline td{color:#555;}
   <div class="cmp" id="cmp"></div>
   <table><thead><tr>
     <th>System</th><th>Status</th><th>Price</th><th>Position</th><th>Floating</th>
-    <th>Locked</th><th>Today</th><th>Cum P&amp;L</th><th>Lancelot</th><th>Switch</th>
+    <th>Locked</th><th>Today</th><th>Cum P&amp;L</th><th>Lancelot</th><th>Session</th>
   </tr></thead><tbody id="rows"></tbody></table>
-  <div class="note">Base P&amp;L vs Original Desk P&amp;L is compared only over base systems currently online
-    (apples-to-apples). Systems 5022-5026 appear here automatically as they are built. Paper trading only.</div>
+  <div class="note">AlbionBase is a standalone mechanical desk (pure Lancelot + 3-TF SSL) &mdash; measured only by its own
+    TOTAL POT growth. Cum P&amp;L counts real Capital.com orders since the Stage-B cutover. PAPER/LIVE is the master switch above.</div>
 </div>
 <script>
 function clk(){var t=new Date();document.getElementById('clock').textContent=
@@ -411,26 +372,48 @@ setInterval(clk,1000);clk();
 function money(v){if(v===null||v===undefined)return '--';var n=Number(v);return (n<0?'-£':'+£')+Math.abs(n).toFixed(2);}
 function bal(v){return v===null||v===undefined?'--':'£'+Number(v).toFixed(2);}
 function cls(v){return Number(v)>=0?'bull':'bear';}
-function setDir(key,mode){
-  fetch('/api/direction/'+key,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:mode,by:'Nick'})})
-    .then(function(r){return r.json();}).then(function(){poll();}).catch(function(e){console.error(e);});
+function renderMode(m, allowLive){
+  var live=(m==='LIVE');
+  var lbl=document.getElementById('modeLabel'), sw=document.getElementById('modeSw');
+  if(lbl){ lbl.innerHTML = live?'LIVE &mdash; REAL MONEY':'PAPER &mdash; DEMO';
+    lbl.style.cssText='padding:3px 10px;border-radius:5px;font-weight:700;font-size:12px;letter-spacing:0.5px;'+(live?'background:#12331b;color:#3fb950;border:1px solid #2ea043;':'background:#3a2f00;color:#e0b020;border:1px solid #6b5600;'); }
+  if(sw){
+    if(!allowLive){ sw.innerHTML='&#128274; PAPER'; sw.title='Live trading locked -- demo only';
+      sw.style.cssText='padding:4px 11px;border-radius:5px;font-weight:700;font-size:12px;background:#26262b;color:#6e7681;border:1px solid #444c56;cursor:not-allowed;'; sw.onclick=null; }
+    else { sw.innerHTML=live?'LIVE &#8594; click for PAPER':'PAPER &#8594; click for LIVE'; sw.title='Flip PAPER/LIVE for ALL systems';
+      sw.style.cssText='padding:4px 11px;border-radius:5px;font-weight:700;font-size:12px;cursor:pointer;'+(live?'background:#12331b;color:#3fb950;border:1px solid #2ea043;':'background:#3a2f00;color:#e0b020;border:1px solid #6b5600;'); sw.onclick=flipMode; }
+  }
 }
-function swBtns(key,mode,online){
-  if(!online){return '<span class="mut">--</span>';}
-  var w=(mode==='WITH')?' class="on-WITH"':'';var a=(mode==='AGAINST')?' class="on-AGAINST"':'';
-  return '<span class="sw"><button'+w+' onclick="setDir(\\''+key+'\\',\\'WITH\\')">WITH</button>'+
-         '<button'+a+' onclick="setDir(\\''+key+'\\',\\'AGAINST\\')">AGAINST</button></span>';
+function sessionCell(s){
+  // Part 4d: coloured dot -- green=in session+tradeable, amber=in session but market temporarily closed,
+  // red=out of session, grey=offline/unknown. Reads the engine's live market-status pre-check.
+  var m=s.market||{}; var hours=m.hours||'--'; var color, title;
+  if(!s.online){ color='#6e7681'; title='offline'; }
+  else if(m.in_session===false){ color='#f85149'; title='out of session -- no trading'; }
+  else if(m.tradeable===false){ color='#d29922'; title='in session, market temporarily closed'; }
+  else if(m.in_session===true){ color='#3fb950'; title='in session, tradeable'; }
+  else { color='#6e7681'; title='market status unknown'; }
+  return '<span title="'+title+'" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:'+color+';margin-right:6px;vertical-align:middle;"></span>'+
+         '<span class="mut">'+hours+'</span>';
+}
+function pollMode(){ fetch('/api/trading-mode').then(function(r){return r.json();}).then(function(d){renderMode(d.mode,d.allow_live);}).catch(function(){}); }
+function flipMode(){
+  fetch('/api/trading-mode').then(function(r){return r.json();}).then(function(d){
+    if(!d.allow_live){ alert('Live trading is locked on this machine (demo only).'); return; }
+    var target=(d.mode==='LIVE')?'PAPER':'LIVE';
+    if(target==='LIVE' && !confirm('Switch ALL systems to LIVE trading on your real Capital.com account. Are you sure? This will use real money.')) return;
+    fetch('/api/trading-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:target})})
+      .then(function(r){return r.json();}).then(function(d2){ renderMode(d2.mode,d2.allow_live); }).catch(function(){});
+  });
 }
 function poll(){
   fetch('/api/systems').then(function(r){return r.json();}).then(function(d){
-    var b=d.base,o=d.original,delta=d.delta;
-    var vClass=delta>=0?'bull':'bear';
-    var vTxt=delta>=0?('Base AHEAD of original desk by '+money(delta).replace('+','')):('Base BEHIND original desk by £'+Math.abs(delta).toFixed(2));
+    var b=d.base;
+    // AlbionBase is a standalone desk -- it measures itself by its own pot growth, not vs other desks.
     document.getElementById('cmp').innerHTML=
-      '<div class="box"><div class="lbl">Base Cum P&amp;L</div><div class="big '+cls(b.cum_pnl)+'">'+money(b.cum_pnl)+'</div><div class="sub">value £'+Number(b.value).toFixed(2)+' &middot; today '+money(b.today_pnl)+'</div></div>'+
-      '<div class="box"><div class="lbl">Original Desk Cum P&amp;L</div><div class="big '+cls(o.cum_pnl)+'">'+money(o.cum_pnl)+'</div><div class="sub">matched systems &middot; value £'+Number(o.value).toFixed(2)+'</div></div>'+
-      '<div class="box"><div class="lbl">Systems Online</div><div class="big">'+d.online_count+' / '+d.total_count+'</div><div class="sub">updated '+(d.updated_utc||'--')+' UTC</div></div>'+
-      '<div class="verdict '+vClass+'">'+vTxt+'</div>';
+      '<div class="box"><div class="lbl">AlbionBase Cum P&amp;L</div><div class="big '+cls(b.cum_pnl)+'">'+money(b.cum_pnl)+'</div><div class="sub">since go-live</div></div>'+
+      '<div class="box"><div class="lbl">Today P&amp;L</div><div class="big '+cls(b.today_pnl)+'">'+money(b.today_pnl)+'</div><div class="sub">all 3 systems</div></div>'+
+      '<div class="box"><div class="lbl">Systems Online</div><div class="big">'+d.online_count+' / '+d.total_count+'</div><div class="sub">updated '+(d.updated_utc||'--')+' UTC</div></div>';
     var p=d.pot||{};
     var live=(p.account_type==='LIVE');
     var tBg=live?'#12331b':'#26262b',tFg=live?'#3fb950':'#8b949e',tBd=live?'#2ea043':'#444c56';
@@ -458,12 +441,13 @@ function poll(){
         '<td class="'+cls(s.today_pnl)+'">'+money(s.today_pnl)+'</td>'+
         '<td class="'+cls(s.cum_pnl)+'">'+money(s.cum_pnl)+'</td>'+
         '<td class="mut" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;">'+(s.lancelot||'--')+'</td>'+
-        '<td>'+swBtns(s.key,s.mode,s.online)+'</td></tr>';
+        '<td>'+sessionCell(s)+'</td></tr>';
     }
     document.getElementById('rows').innerHTML=h;
   }).catch(function(e){});
 }
 poll();setInterval(poll,7000);
+pollMode();setInterval(pollMode,5000);
 /* Gaius collection light (28 Jul brief): green < 24h, red = stale (click to collect). */
 function renderGaiusBar(g){
   var el=document.getElementById('gaius-bar'); if(!el) return; g=g||{};
