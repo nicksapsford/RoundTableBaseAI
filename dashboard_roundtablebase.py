@@ -25,6 +25,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request
 from trading_mode import read_mode, write_mode, reset_to_demo, PNL_START_DATE
+import ledger
 
 BASE_DIR = Path(__file__).resolve().parent
 _VER = BASE_DIR / "VERSION"
@@ -66,6 +67,14 @@ try:
     log.warning("Startup: trading mode forced to DEMO (Part 3f).")
 except Exception as _e:
     log.warning("Startup DEMO reset failed: %s", _e)
+
+# Part 3b: seed the investment ledger on first run (no-op if it already exists). Default = the go-live
+# deposit placeholder; Nick edits the amount/date to his real first deposit (or, on demo, his funded amount).
+try:
+    if ledger.seed_if_missing(1000, notes="Initial go-live capital (seed -- edit to your real deposit)"):
+        log.warning("Seeded investment_ledger.csv (edit the opening row to your real net invested).")
+except Exception as _e:
+    log.warning("Ledger seed failed: %s", _e)
 
 
 def _pushover_send(title, message):
@@ -333,6 +342,39 @@ def api_trading_mode():
     return jsonify({"mode": read_mode(), "live_configured": live_configured, "position_open": pos_open, "ok": ok})
 
 
+def _capital_balance():
+    """The real (shared) Capital.com balance = TOTAL POT, from any online system's report. None if all offline."""
+    g = _gather()
+    pots = [s.get("acct_bal") for s in g["systems"] if s.get("online") and s.get("acct_bal") is not None]
+    return pots[0] if pots else None
+
+
+@app.route("/api/ledger", methods=["GET"])
+def api_ledger():
+    """Investment-ledger summary + the TRUE Trading P&L (= Capital.com balance - net invested)."""
+    return jsonify(ledger.summary(_capital_balance()))
+
+
+@app.route("/api/ledger/deposit", methods=["POST"])
+def api_ledger_deposit():
+    body = request.get_json(force=True, silent=True) or {}
+    row = ledger.append("DEPOSIT", body.get("amount"), body.get("notes", ""))
+    if not row:
+        return jsonify({"error": "Invalid amount -- enter a positive number."}), 400
+    log.warning("LEDGER deposit +£%s (%s)", row["amount_gbp"], row.get("notes", ""))
+    return jsonify({"ok": True, "row": row, "summary": ledger.summary(_capital_balance())})
+
+
+@app.route("/api/ledger/withdraw", methods=["POST"])
+def api_ledger_withdraw():
+    body = request.get_json(force=True, silent=True) or {}
+    row = ledger.append("WITHDRAWAL", body.get("amount"), body.get("notes", ""))
+    if not row:
+        return jsonify({"error": "Invalid amount -- enter a positive number."}), 400
+    log.warning("LEDGER withdrawal -£%s (%s)", row["amount_gbp"], row.get("notes", ""))
+    return jsonify({"ok": True, "row": row, "summary": ledger.summary(_capital_balance())})
+
+
 @app.route("/api/shutdown-all", methods=["POST"])
 def api_shutdown_all():
     """SHUTDOWN ALL -- mirror the original RoundTable mechanism: POST
@@ -413,13 +455,14 @@ tr.offline td{color:#555;}
 </header>
 <div class="wrap">
   <div id="potbar" style="display:flex;gap:26px;align-items:center;flex-wrap:wrap;background:var(--bg2);border:1px solid var(--bd);border-radius:10px;padding:12px 18px;margin-bottom:14px;"></div>
+  <div id="ledgerCard" style="background:var(--bg2);border:1px solid var(--bd);border-radius:10px;padding:14px 18px;margin-bottom:14px;"></div>
   <div class="cmp" id="cmp"></div>
   <table><thead><tr>
     <th>System</th><th>Status</th><th>Price</th><th>Position</th><th>Floating</th>
-    <th>Locked</th><th>Today</th><th>Cum P&amp;L</th><th>Lancelot</th><th>Session</th>
+    <th>Locked</th><th>Today</th><th>Contribution</th><th>Lancelot</th><th>Session</th>
   </tr></thead><tbody id="rows"></tbody></table>
-  <div class="note">AlbionBase is a standalone mechanical desk (pure Lancelot + 3-TF SSL) &mdash; measured only by its own
-    TOTAL POT growth. Cum P&amp;L counts real Capital.com orders since the Stage-B cutover. PAPER/LIVE is the master switch above.</div>
+  <div class="note">Trading P&amp;L (above) = Capital.com balance &minus; net invested &mdash; the true figure, matching the broker exactly.
+    Per-system <b>Contribution</b> is a price-based estimate (points &times; stake) kept for Gaius, not the account truth. DEMO/LIVE is the master switch above.</div>
 </div>
 <script>
 function clk(){var t=new Date();document.getElementById('clock').textContent=
@@ -481,8 +524,8 @@ function poll(){
     var b=d.base;
     // AlbionBase is a standalone desk -- it measures itself by its own pot growth, not vs other desks.
     document.getElementById('cmp').innerHTML=
-      '<div class="box"><div class="lbl">AlbionBase Cum P&amp;L</div><div class="big '+cls(b.cum_pnl)+'">'+money(b.cum_pnl)+'</div><div class="sub">since go-live</div></div>'+
-      '<div class="box"><div class="lbl">Today P&amp;L</div><div class="big '+cls(b.today_pnl)+'">'+money(b.today_pnl)+'</div><div class="sub">all 3 systems</div></div>'+
+      '<div class="box"><div class="lbl">Systems Contribution</div><div class="big '+cls(b.cum_pnl)+'">'+money(b.cum_pnl)+'</div><div class="sub">price estimate (Gaius) &mdash; not the account truth</div></div>'+
+      '<div class="box"><div class="lbl">Today (est.)</div><div class="big '+cls(b.today_pnl)+'">'+money(b.today_pnl)+'</div><div class="sub">all 3 systems</div></div>'+
       '<div class="box"><div class="lbl">Systems Online</div><div class="big">'+d.online_count+' / '+d.total_count+'</div><div class="sub">updated '+(d.updated_utc||'--')+' UTC</div></div>';
     var p=d.pot||{};
     var live=(p.account_type==='LIVE');
@@ -518,6 +561,39 @@ function poll(){
 }
 poll();setInterval(poll,7000);
 pollMode();setInterval(pollMode,5000);
+/* ── Investment ledger (Part 3): true Trading P&L = Capital.com balance - net invested ── */
+function _lkv(label,val){return '<div><div style="color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:0.6px;">'+label+'</div><div style="font-size:18px;font-weight:800;">'+val+'</div></div>';}
+function renderLedger(d){
+  d=d||{}; var el=document.getElementById('ledgerCard'); if(!el)return; var tp=d.trading_pnl;
+  var btn='font-weight:700;font-size:12px;border-radius:6px;padding:6px 12px;cursor:pointer;margin-left:8px;';
+  el.innerHTML=
+    '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">'+
+      '<div style="font-size:12px;font-weight:800;letter-spacing:1px;color:var(--mut);text-transform:uppercase;">Investment Ledger</div>'+
+      '<div><button onclick="addDeposit()" style="'+btn+'background:#12331b;color:#3fb950;border:1px solid #2ea043;">+ Add deposit</button>'+
+      '<button onclick="recordWithdrawal()" style="'+btn+'background:#3a2f00;color:#e0b020;border:1px solid #6b5600;">&minus; Record withdrawal</button></div>'+
+    '</div>'+
+    '<div style="display:flex;gap:26px;flex-wrap:wrap;margin-top:12px;align-items:flex-end;">'+
+      _lkv('Total deposited', d.deposited!=null?bal(d.deposited):'--')+
+      _lkv('Total withdrawn', d.withdrawn!=null?bal(d.withdrawn):'--')+
+      _lkv('Net invested', d.net_invested!=null?bal(d.net_invested):'--')+
+      _lkv('Capital.com balance', d.balance!=null?bal(d.balance):'--')+
+      '<div><div style="color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:0.6px;">Trading P&amp;L</div>'+
+        '<div class="'+cls(tp)+'" style="font-size:24px;font-weight:800;">'+(tp!=null?money(tp):'--')+'</div>'+
+        '<div class="mut" style="font-size:10px;">balance &minus; net invested (matches the broker)</div></div>'+
+    '</div>';
+}
+function pollLedger(){ fetch('/api/ledger').then(function(r){return r.json();}).then(renderLedger).catch(function(){}); }
+function _ledgerTxn(url,verb){
+  var a=prompt(verb+' amount (£):'); if(a===null)return;
+  var amt=parseFloat(a); if(!(amt>0)){alert('Enter a positive number.');return;}
+  var notes=prompt('Notes (optional):'); if(notes===null)notes='';
+  fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amount:amt,notes:notes})})
+    .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){alert(res.error);} if(res&&res.summary){renderLedger(res.summary);} pollLedger(); })
+    .catch(function(){ alert('Ledger update failed.'); });
+}
+function addDeposit(){ _ledgerTxn('/api/ledger/deposit','Deposit'); }
+function recordWithdrawal(){ if(!confirm('Record a withdrawal from the account?'))return; _ledgerTxn('/api/ledger/withdraw','Withdrawal'); }
+pollLedger();setInterval(pollLedger,7000);
 /* Gaius collection light (28 Jul brief): green < 24h, red = stale (click to collect). */
 function renderGaiusBar(g){
   var el=document.getElementById('gaius-bar'); if(!el) return; g=g||{};
