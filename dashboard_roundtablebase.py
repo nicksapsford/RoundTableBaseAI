@@ -54,6 +54,7 @@ else:
 
 PUSHOVER_USER_KEY  = os.getenv("PUSHOVER_USER_KEY", "").strip()
 PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN", "").strip()
+LIVE_NOTIFICATIONS = os.getenv("LIVE_NOTIFICATIONS", "False").strip().lower() in ("1", "true", "yes", "on")
 
 logging.basicConfig(level=logging.WARNING)
 logging.Formatter.converter = time.gmtime
@@ -77,26 +78,30 @@ except Exception as _e:
     log.warning("Ledger seed failed: %s", _e)
 
 
-def _pushover_send(title, message):
-    """Percival alert via Pushover. Silent no-op if credentials are not configured."""
+def _pushover_send(title, message, priority=1):
+    """Percival alert via Pushover. Gated by LIVE_NOTIFICATIONS (AlbionBase master switch) + creds."""
+    if not LIVE_NOTIFICATIONS:
+        return
     if not (PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN):
         log.warning("Pushover not configured -- skipping alert: %s", message)
         return
     try:
         import urllib.parse
         data = urllib.parse.urlencode({"token": PUSHOVER_API_TOKEN, "user": PUSHOVER_USER_KEY,
-                                       "title": title, "message": message, "priority": 1}).encode()
+                                       "title": title, "message": message, "priority": priority}).encode()
         urllib.request.urlopen("https://api.pushover.net/1/messages.json", data=data, timeout=6)
     except Exception as exc:
         log.warning("Pushover send failed: %s", exc)
 
 
 def _percival_mode_alert(mode):
-    """Part 3e: fire a Pushover on every DEMO/LIVE change."""
+    """Fire a High-priority Pushover on every DEMO/LIVE change (always High -- Part 4d)."""
     if mode == "LIVE":
-        _pushover_send("AlbionBase mode change", "AlbionBase switched to LIVE — real money active")
+        _pushover_send("AlbionBase switched to LIVE 🔴",
+                       "Real money active on Capital.com live account\nAll 3 systems now trading live", priority=1)
     else:
-        _pushover_send("AlbionBase mode change", "AlbionBase switched to DEMO — demo mode active")
+        _pushover_send("AlbionBase switched to DEMO 🟡",
+                       "Demo mode active\nAll 3 systems now trading demo account", priority=1)
 
 # AlbionBase systems (standalone desk -- no cross-desk comparison, Part 4a). 3 instruments: Gold/Oil/US500.
 SYSTEMS = [
