@@ -186,14 +186,24 @@ def _fetch_one(cfg):
         # A compact position/lancelot summary (crypto has two instruments)
         legs = [st.get("btc"), st.get("eth")] if cfg["key"] == "crypto" else [st]
         pos_bits, lanc_bits = [], []
+        _short = cfg["name"].replace("Base", "")   # GoldBase -> Gold (Part 4b: label was blank on non-crypto)
         for leg in legs:
             if not isinstance(leg, dict):
                 continue
             if leg.get("in_trade") and leg.get("position"):
-                pos_bits.append("%s %s" % (leg.get("label", ""), leg["position"].get("direction", "")))
+                pos_bits.append("%s %s" % (leg.get("label") or _short, leg["position"].get("direction", "")))
             lanc_bits.append(str(leg.get("lancelot", "")))
         row["position"] = ", ".join(b for b in pos_bits if b.strip()) or "FLAT"
         row["lancelot"] = " / ".join(b for b in lanc_bits if b) or "--"
+        # Part 4a: entry/stop/target + distance-to-stop / distance-to-TP for the open position (single-instrument).
+        row["pos_detail"] = None
+        if st.get("in_trade") and isinstance(st.get("position"), dict):
+            _p = st["position"]; _price = _fnum(st.get("price"))
+            def _dist(a, b):
+                try: return round(abs(float(a) - float(b)), 1)
+                except (TypeError, ValueError): return None
+            row["pos_detail"] = {"entry": _p.get("entry"), "stop": _p.get("stop"), "target": _p.get("target"),
+                                 "to_stop": _dist(_price, _p.get("stop")), "to_tp": _dist(_price, _p.get("target"))}
         row["price"] = (st.get("btc") or {}).get("price") if cfg["key"] == "crypto" else _fnum(st.get("price"))
 
     # Part 2: PAPER/LIVE trading mode is a desk-wide master (trading_mode.json), not per-system.
@@ -495,6 +505,15 @@ function renderMode(d){
     }
   }
 }
+function posDetail(s){
+  // Part 4a: entry, stop, and how far price is from the stop / take-profit (so Nick can see protection).
+  var d=s.pos_detail; if(!d)return '';
+  var bits=[];
+  if(d.entry!=null) bits.push('@'+d.entry);
+  if(d.stop!=null) bits.push('stop '+d.stop+(d.to_stop!=null?' ('+d.to_stop+'&rarr;stop)':''));
+  if(d.to_tp!=null) bits.push(d.to_tp+'&rarr;TP');
+  return bits.length ? '<div class="mut" style="font-size:10px;line-height:1.4;">'+bits.join(' &middot; ')+'</div>' : '';
+}
 function sessionCell(s){
   // Part 4d: coloured dot -- green=in session+tradeable, amber=in session but market temporarily closed,
   // red=out of session, grey=offline/unknown. Reads the engine's live market-status pre-check.
@@ -553,7 +572,7 @@ function poll(){
       h+='<tr><td><span style="color:'+s.colour+'">&#9632;</span> '+s.name+' <span class="mut">:'+s.port+'</span></td>'+
         '<td><span class="dot on"></span>online</td>'+
         '<td>'+(s.price!=null?'£'+Number(s.price).toLocaleString('en-GB',{maximumFractionDigits:2}):'--')+'</td>'+
-        '<td>'+(s.position||'--')+'</td>'+
+        '<td>'+(s.position||'--')+posDetail(s)+'</td>'+
         '<td class="'+cls(s.floating_gbp)+'">'+money(s.floating_gbp)+'</td>'+
         '<td class="'+(s.locked!=null&&Number(s.locked)>0?'green':'mut')+'">'+(s.locked!=null&&Number(s.locked)>0?'&#128274; +£'+Number(s.locked).toFixed(2):'--')+'</td>'+
         '<td class="'+cls(s.today_pnl)+'">'+money(s.today_pnl)+'</td>'+
