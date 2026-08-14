@@ -172,6 +172,9 @@ def _fetch_one(cfg):
         row["mode"] = st.get("mode")
         row["acct_bal"] = _fnum(st.get("account_balance"))    # Part 3: shared Capital.com pot (read-only)
         row["acct_type"] = st.get("account_type")
+        # Risk/trade is RISK_PCT of the FIXED NOTIONAL_CAPITAL (£60 on £3,000) as the trader reports it --
+        # NOT 2% of the real Capital.com balance (that showed £611 against the ~£30k demo pot).
+        row["risk_per_trade"] = _fnum(st.get("risk_per_trade"))
         row["session"] = st.get("session") or row["session"]
         row["market"] = st.get("market")   # Part 4d: {in_session, tradeable, hours} for the status dot
         row["live_configured"] = st.get("live_configured")   # DEMO/LIVE: are this system's live creds set?
@@ -220,12 +223,15 @@ def _gather():
     bench_today = sum((r["today_pnl"] or 0.0) for r in online)
     bench_cum = sum((r["cum_pnl"] or 0.0) for r in online)
     # Part 3: TOTAL POT = the real (shared) Capital.com balance -- every system reports the same figure,
-    # so take the first non-null. Risk per trade = 2% of it. Read-only.
+    # so take the first non-null. Read-only.
     pots = [r["acct_bal"] for r in online if r.get("acct_bal") is not None]
     total_pot = pots[0] if pots else None
     atypes = [r["acct_type"] for r in online if r.get("acct_type")]
     account_type = (atypes[0] if atypes else "DEMO")
-    risk_pt = round(total_pot * 0.02, 2) if total_pot else None
+    # Risk/trade = each trader's reported figure (RISK_PCT of the FIXED £3,000 notional = £60), NOT 2% of
+    # the real balance -- that showed £611 against the ~£30k demo pot; sizing never uses the real balance.
+    risks = [r.get("risk_per_trade") for r in online if r.get("risk_per_trade") is not None]
+    risk_pt = risks[0] if risks else None
     return {
         "systems": rows,
         "online_count": len(online),
