@@ -79,8 +79,13 @@ except Exception as _e:
 
 
 def _pushover_send(title, message, priority=1):
-    """Percival alert via Pushover. Gated by LIVE_NOTIFICATIONS (AlbionBase master switch) + creds."""
+    """Percival alert via Pushover. Gated by LIVE_NOTIFICATIONS + trading_mode==LIVE (K1 live box only)."""
     if not LIVE_NOTIFICATIONS:
+        return
+    try:                                  # STANDING RULE: Pushover ONLY in LIVE mode; DEMO/unknown = silent
+        if read_mode() != "LIVE":
+            return
+    except Exception:
         return
     if not (PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN):
         log.warning("Pushover not configured -- skipping alert: %s", message)
