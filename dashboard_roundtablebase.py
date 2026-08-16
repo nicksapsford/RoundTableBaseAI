@@ -150,7 +150,7 @@ def _fetch_one(cfg):
            "online": False, "mode": None, "price": None, "position": None,
            "floating_gbp": 0.0, "locked": None, "today_pnl": None, "balance": None,
            "cum_pnl": None, "lancelot": "--", "session": "24/7" if cfg["key"] == "crypto" else "--",
-           "market": None, "acct_bal": None, "acct_type": None}
+           "market": None, "acct_bal": None, "acct_type": None, "data_only": False}
 
     st = _get_json("http://%s:%d/api/state" % (ALBIONBASE_HOST, cfg["port"]))
     if st and (st.get("portfolio") or st.get("balance") is not None):
@@ -175,6 +175,7 @@ def _fetch_one(cfg):
         else:
             row["locked"] = _fnum(st.get("locked_gbp"))
         row["mode"] = st.get("mode")
+        row["data_only"] = bool(st.get("data_only"))          # DEMOTED -> amber "data only" badge (no real orders)
         row["acct_bal"] = _fnum(st.get("account_balance"))    # Part 3: shared Capital.com pot (read-only)
         row["acct_type"] = st.get("account_type")
         # Risk/trade is RISK_PCT of the FIXED NOTIONAL_CAPITAL (£60 on £3,000) as the trader reports it --
@@ -580,7 +581,8 @@ function poll(){
            '<td><span class="dot off"></span>not online</td><td colspan="8" class="mut">awaiting build / launch</td></tr>';
         continue;
       }
-      h+='<tr><td><span style="color:'+s.colour+'">&#9632;</span> '+s.name+' <span class="mut">:'+s.port+'</span></td>'+
+      var demoted=s.data_only?' <span style="background:#3a2f00;color:#e0b020;border:1px solid #6b5600;border-radius:4px;padding:1px 5px;font-size:10px;font-weight:700;white-space:nowrap;" title="Signal has no demonstrated edge -- Lancelot still runs and logs, but NO real orders are placed">DEMOTED &mdash; data only</span>':'';
+      h+='<tr><td><span style="color:'+s.colour+'">&#9632;</span> '+s.name+demoted+' <span class="mut">:'+s.port+'</span></td>'+
         '<td><span class="dot on"></span>online</td>'+
         '<td>'+(s.price!=null?'£'+Number(s.price).toLocaleString('en-GB',{maximumFractionDigits:2}):'--')+'</td>'+
         '<td>'+(s.position||'--')+posDetail(s)+'</td>'+
