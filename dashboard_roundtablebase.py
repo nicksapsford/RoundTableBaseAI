@@ -113,8 +113,9 @@ SYSTEMS = [
     {"key": "oil",  "name": "OilBase",  "market": "Brent Crude", "port": 5035, "start": 1000.0, "colour": "#FF6600"},
     {"key": "gold", "name": "GoldBase", "market": "GOLD (XAU)",  "port": 5033, "start": 1000.0, "colour": "#FFD700"},
     {"key": "us",   "name": "USBase",   "market": "S&P 500",     "port": 5034, "start": 1000.0, "colour": "#FFFFFF"},
-    # FTSEBase REMOVED 11 Aug 2026 -- £2/pt on UK100 (~£21.7k notional, ~£1,080 margin) exceeds the
-    # £3,000 pot at 2% risk. AlbionBase runs 3 instruments: Gold, Oil, US500. FTSEBaseAI repo archived.
+    {"key": "audusd", "name": "AUDUSDBase", "market": "AUD/USD",  "port": 5032, "start": 1000.0, "colour": "#33b1ff"},
+    # FTSEBase REMOVED 11 Aug 2026 -- £2/pt on UK100 exceeds the £3k pot. Port 5032 reused by AUDUSDBase
+    # (16 Aug 2026) -- the first non-Gold edge: 1h Bollinger mean-reversion, US session, PF 1.40-2.84.
 ]
 SYS_BY_KEY = {s["key"]: s for s in SYSTEMS}
 
@@ -208,8 +209,13 @@ def _fetch_one(cfg):
         row["pos_detail"] = None
         if st.get("in_trade") and isinstance(st.get("position"), dict):
             _p = st["position"]; _price = _fnum(st.get("price"))
+            # FX (AUDUSD ~0.7) needs distances in PIPS, not raw price units -- a raw 0.003 rounds to 0.0.
+            # Prices under 10 are FX pairs (Gold/Oil/US500 are all >> 10) -> express the gap in pips (x10000).
+            _fx = _price is not None and abs(_price) < 10
             def _dist(a, b):
-                try: return round(abs(float(a) - float(b)), 1)
+                try:
+                    d = abs(float(a) - float(b))
+                    return round(d * 10000, 1) if _fx else round(d, 1)
                 except (TypeError, ValueError): return None
             row["pos_detail"] = {"entry": _p.get("entry"), "stop": _p.get("stop"), "target": _p.get("target"),
                                  "to_stop": _dist(_price, _p.get("stop")), "to_tp": _dist(_price, _p.get("target"))}
