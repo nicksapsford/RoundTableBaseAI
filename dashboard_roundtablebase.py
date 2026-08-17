@@ -112,7 +112,7 @@ def _percival_mode_alert(mode):
 SYSTEMS = [
     {"key": "gold", "name": "GoldBase", "market": "GOLD (XAU)",  "port": 5033, "start": 1000.0, "colour": "#FFD700"},
     {"key": "us",   "name": "USBase",   "market": "S&P 500",     "port": 5034, "start": 1000.0, "colour": "#FFFFFF"},
-    {"key": "audusd", "name": "AUDUSDBase", "market": "AUD/USD",  "port": 5032, "start": 1000.0, "colour": "#33b1ff"},
+    {"key": "audusd", "name": "AUDUSDBase", "market": "AUD/USD",  "port": 5032, "start": 1000.0, "colour": "#33b1ff", "optional": True},
     # OilBase REMOVED 17 Aug 2026 -- SSL/RSI/TMO has no edge on Oil (backtest PF 0.53/0.96); stopped + repo archived.
     # FTSEBase REMOVED 11 Aug 2026 -- £2/pt on UK100 exceeds the £3k pot. Port 5032 reused by AUDUSDBase
     # (16 Aug 2026) -- the first non-Gold edge: 1h Bollinger mean-reversion, US session, PF 1.40-2.84.
@@ -148,6 +148,7 @@ def _fetch_one(cfg):
     """Return a uniform row for one base system + its original counterpart."""
     row = {"key": cfg["key"], "name": cfg["name"], "market": cfg["market"],
            "port": cfg["port"], "colour": cfg["colour"], "start": cfg["start"],
+           "optional": cfg.get("optional", False),   # optional systems (e.g. AUDUSD pre-K1) hide when offline
            "online": False, "mode": None, "price": None, "position": None,
            "floating_gbp": 0.0, "locked": None, "today_pnl": None, "balance": None,
            "cum_pnl": None, "lancelot": "--", "session": "24/7" if cfg["key"] == "crypto" else "--",
@@ -247,7 +248,9 @@ def _gather():
     return {
         "systems": rows,
         "online_count": len(online),
-        "total_count": len(SYSTEMS),
+        # don't count optional-offline systems (e.g. AUDUSD not yet on K1) toward the total -- they're hidden,
+        # so counting them would show a misleading "2/3" with only 2 rows.
+        "total_count": len([r for r in rows if (not r.get("optional")) or r.get("online")]),
         "pot": {"total": total_pot, "account_type": account_type, "risk": risk_pt},
         "base": {"value": round(bench_val, 2), "today_pnl": round(bench_today, 2),
                       "cum_pnl": round(bench_cum, 2)},
@@ -582,6 +585,7 @@ function poll(){
       '<div class="mut" style="font-size:11px;max-width:300px;line-height:1.5;">Read live from the Capital.com account (read-only). Per-system paper balances retired &mdash; per-system P&amp;L is in the table.</div>';
     var h='';
     for(var i=0;i<d.systems.length;i++){var s=d.systems[i];
+      if(s.optional && !s.online){ continue; }   // hide optional systems (e.g. AUDUSD pre-K1) when not deployed here
       if(!s.online){
         h+='<tr class="offline"><td>'+s.name+' <span class="mut">:'+s.port+'</span></td>'+
            '<td><span class="dot off"></span>not online</td><td colspan="8" class="mut">awaiting build / launch</td></tr>';
