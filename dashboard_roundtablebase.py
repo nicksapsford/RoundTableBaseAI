@@ -3,8 +3,8 @@ dashboard_roundtablebase.py -- RoundTableBase A.I. (AlbionBase Desk)
 ================================================================================
 Command centre for the AlbionBase promotion desk. Port 5036.
 
-  * Reads the 3 AlbionBase systems -- OilBase 5035, GoldBase 5033,
-    USBase 5034 (shows only the ones that are up; offline systems render gracefully).
+  * Reads the 3 AlbionBase systems -- GoldBase 5033, USBase 5034, AUDUSDBase 5032
+    (shows only the ones that are up; offline systems render gracefully). OilBase removed 17 Aug 2026 (no edge).
   * Reads the live AI traders on ports 5002-5005 purely for the P&L comparison
     (AlbionBase mechanical vs full-AI Albion, apples-to-apples per instrument).
   * Each system's WITH/AGAINST direction switch is shown and controllable here
@@ -110,10 +110,10 @@ def _percival_mode_alert(mode):
 
 # AlbionBase systems (standalone desk -- no cross-desk comparison, Part 4a). 3 instruments: Gold/Oil/US500.
 SYSTEMS = [
-    {"key": "oil",  "name": "OilBase",  "market": "Brent Crude", "port": 5035, "start": 1000.0, "colour": "#FF6600"},
     {"key": "gold", "name": "GoldBase", "market": "GOLD (XAU)",  "port": 5033, "start": 1000.0, "colour": "#FFD700"},
     {"key": "us",   "name": "USBase",   "market": "S&P 500",     "port": 5034, "start": 1000.0, "colour": "#FFFFFF"},
     {"key": "audusd", "name": "AUDUSDBase", "market": "AUD/USD",  "port": 5032, "start": 1000.0, "colour": "#33b1ff"},
+    # OilBase REMOVED 17 Aug 2026 -- SSL/RSI/TMO has no edge on Oil (backtest PF 0.53/0.96); stopped + repo archived.
     # FTSEBase REMOVED 11 Aug 2026 -- £2/pt on UK100 exceeds the £3k pot. Port 5032 reused by AUDUSDBase
     # (16 Aug 2026) -- the first non-Gold edge: 1h Bollinger mean-reversion, US session, PF 1.40-2.84.
 ]
