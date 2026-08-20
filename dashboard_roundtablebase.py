@@ -3,8 +3,9 @@ dashboard_roundtablebase.py -- RoundTableBase A.I. (AlbionBase Desk)
 ================================================================================
 Command centre for the AlbionBase promotion desk. Port 5036.
 
-  * Reads the 3 AlbionBase systems -- GoldBase 5033, USBase 5034, AUDUSDBase 5032
-    (shows only the ones that are up; offline systems render gracefully). OilBase removed 17 Aug 2026 (no edge).
+  * Reads the 2 AlbionBase systems -- GoldBase 5033, AUDUSDBase 5032
+    (shows only the ones that are up; offline systems render gracefully). OilBase removed 17 Aug 2026 (no edge);
+    US500/USBase removed 20 Aug 2026 (PF 1.49 was a lookahead artifact; honest PF 0.97 net-negative).
   * Reads the live AI traders on ports 5002-5005 purely for the P&L comparison
     (AlbionBase mechanical vs full-AI Albion, apples-to-apples per instrument).
   * Each system's WITH/AGAINST direction switch is shown and controllable here
@@ -103,16 +104,18 @@ def _percival_mode_alert(mode):
     """Fire a High-priority Pushover on every DEMO/LIVE change (always High -- Part 4d)."""
     if mode == "LIVE":
         _pushover_send("AlbionBase switched to LIVE 🔴",
-                       "Real money active on Capital.com live account\nAll 3 systems now trading live", priority=1)
+                       "Real money active on Capital.com live account\nAll systems now trading live", priority=1)
     else:
         _pushover_send("AlbionBase switched to DEMO 🟡",
-                       "Demo mode active\nAll 3 systems now trading demo account", priority=1)
+                       "Demo mode active\nAll systems now trading demo account", priority=1)
 
-# AlbionBase systems (standalone desk -- no cross-desk comparison, Part 4a). 3 instruments: Gold/Oil/US500.
+# AlbionBase systems (standalone desk -- no cross-desk comparison, Part 4a). 2 instruments: Gold/AUDUSD.
 SYSTEMS = [
     {"key": "gold", "name": "GoldBase", "market": "GOLD (XAU)",  "port": 5033, "start": 1000.0, "colour": "#FFD700"},
-    {"key": "us",   "name": "USBase",   "market": "S&P 500",     "port": 5034, "start": 1000.0, "colour": "#FFFFFF"},
     {"key": "audusd", "name": "AUDUSDBase", "market": "AUD/USD",  "port": 5032, "start": 1000.0, "colour": "#33b1ff", "optional": True},
+    # US500/USBase REMOVED 20 Aug 2026 -- the PF 1.49 that justified its live slot was a 1-bar lookahead
+    # artifact; honest re-validation is PF 0.97 net-negative (fails the same standard that demoted Oil).
+    # Stopped K1 + Dell, repo archived. US500 data collection continues on USBenchmark only.
     # OilBase REMOVED 17 Aug 2026 -- SSL/RSI/TMO has no edge on Oil (backtest PF 0.53/0.96); stopped + repo archived.
     # FTSEBase REMOVED 11 Aug 2026 -- £2/pt on UK100 exceeds the £3k pot. Port 5032 reused by AUDUSDBase
     # (16 Aug 2026) -- the first non-Gold edge: 1h Bollinger mean-reversion, US session, PF 1.40-2.84.
